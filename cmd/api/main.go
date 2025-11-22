@@ -37,8 +37,13 @@ func main() {
 	apiHandler := handler.NewApiHandler(sourceFetchSvc)
 
 	// Router
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	r := httpTransport.NewRouter(devSourceHandler, apiHandler)
-	if err := r.Run(":8080"); err != nil {
-		log.Fatal(err)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("failed to start server: %v", err)
 	}
 }
