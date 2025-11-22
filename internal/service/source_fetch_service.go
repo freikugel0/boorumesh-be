@@ -21,7 +21,7 @@ var (
 )
 
 type SourceFetchService interface {
-	FetchBySource(ctx context.Context, code string, tags []string, page, limit int) ([]domain.Image, error)
+	FetchBySource(ctx context.Context, code string, tags []string, page, limit int, raw bool) ([]domain.Image, error)
 }
 
 type sourceFetchService struct {
@@ -38,7 +38,7 @@ func NewSourceFetchService(repo repository.SourceRepository) SourceFetchService 
 	}
 }
 
-func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tags []string, page, limit int) ([]domain.Image, error) {
+func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tags []string, page, limit int, raw bool) ([]domain.Image, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return nil, errors.New("code is required")
@@ -87,7 +87,7 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 		tagParts = append(tagParts, strings.Join(tags, " "))
 	}
 	// Append tags suffix
-	if strings.TrimSpace(upstream.Defaults.TagsSuffix) != "" {
+	if !raw && strings.TrimSpace(upstream.Defaults.TagsSuffix) != "" {
 		tagParts = append(tagParts, strings.TrimSpace(upstream.Defaults.TagsSuffix))
 	}
 

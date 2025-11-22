@@ -48,9 +48,12 @@ func (h *ApiHandler) GetImagesBySource(c *gin.Context) {
 		}
 	}
 
+	// Option for disabling tags suffix
+	raw := c.Query("raw") == "1"
+
 	ctx := c.Request.Context()
 
-	images, err := h.fetchService.FetchBySource(ctx, code, tags, page, limit)
+	images, err := h.fetchService.FetchBySource(ctx, code, tags, page, limit, raw)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrSourceNotFound):
