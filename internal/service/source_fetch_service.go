@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,15 +44,15 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 		return nil, errors.New("code is required")
 	}
 
-	// Get source code
-	src, err := s.repo.GetByCode(ctx, domain.SourceCode(code))
+	// Get upstream source
+	upstream, err := s.repo.GetByCode(ctx, domain.SourceCode(code))
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, ErrSourceNotFound
 		}
 		return nil, err
 	}
-	if !src.Enabled {
+	if !upstream.Enabled {
 		return nil, ErrSourceDisabled
 	}
 
@@ -59,7 +60,7 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 	if page <= 0 {
 		page = 1
 	}
-	maxLimit := src.Defaults.MaxLimit
+	maxLimit := upstream.Defaults.MaxLimit
 	if maxLimit <= 0 {
 		maxLimit = 100
 	}
@@ -68,21 +69,40 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 	}
 
 	// Build base URL: base_url + posts_path
-	baseURL := strings.TrimRight(src.BaseURL, "/") + "/" + strings.TrimLeft(src.Request.PostsPath, "/")
+	baseURL := strings.TrimRight(upstream.BaseURL, "/") + "/" + strings.TrimLeft(upstream.Request.PostsPath, "/")
 
 	// Context with timeout per-source
-	if src.Defaults.TimeoutMS > 0 {
+	if upstream.Defaults.TimeoutMS > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(src.Defaults.TimeoutMS)*time.Millisecond)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(upstream.Defaults.TimeoutMS)*time.Millisecond)
 		defer cancel()
 	}
 
 	// Build resty request
-	req := s.httpClient.R().SetContext(ctx).SetHeaders(src.Request.Headers)
+	req := s.httpClient.R().SetContext(ctx).SetHeaders(upstream.Request.Headers)
 
-	// Query params
+	// Build tags value
+	var tagParts []string
 	if len(tags) > 0 {
-		req.SetQueryParam(src.Request.LimitParam, strconv.Itoa(limit)).SetQueryParam(src.Request.PageParam, strconv.Itoa(page))
+		tagParts = append(tagParts, strings.Join(tags, " "))
+	}
+	// Append tags suffix
+	if strings.TrimSpace(upstream.Defaults.TagsSuffix) != "" {
+		tagParts = append(tagParts, strings.TrimSpace(upstream.Defaults.TagsSuffix))
+	}
+
+	// Set tags query params
+	if len(tagParts) > 0 {
+		req.SetQueryParam(upstream.Request.TagsParam, strings.Join(tagParts, " "))
+	}
+
+	req.
+		SetQueryParam(upstream.Request.LimitParam, strconv.Itoa(limit)).
+		SetQueryParam(upstream.Request.PageParam, strconv.Itoa(page))
+
+	// optional: Extra Query
+	for k, v := range upstream.Request.ExtraQuery {
+		req.SetQueryParam(k, v)
 	}
 
 	// Exec request
@@ -96,15 +116,20 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 	}
 
 	// Decode JSON
+	body := resp.Body()
+
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+
 	var rawPosts []map[string]any
-	if err := json.Unmarshal(resp.Body(), &rawPosts); err != nil {
+	if err := dec.Decode(&rawPosts); err != nil {
 		return nil, fmt.Errorf("failed to decode upstream json: %w", err)
 	}
 
 	// Map response to domain.Image
 	images := make([]domain.Image, 0, len(rawPosts))
 	for _, raw := range rawPosts {
-		img, err := mapRawToImage(src, raw)
+		img, err := mapRawToImage(upstream, raw)
 		if err != nil {
 			continue
 		}
@@ -117,17 +142,6 @@ func (s *sourceFetchService) FetchBySource(ctx context.Context, code string, tag
 func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) {
 	m := src.Mapping.Fields
 
-	// Required fields
-
-	idMapping, ok := m["id"]
-	if !ok || idMapping.Key == "" {
-		return domain.Image{}, errors.New("mapping for 'id' is missing")
-	}
-	fileMapping, ok := m["file_url"]
-	if !ok || fileMapping.Key == "" {
-		return domain.Image{}, errors.New("mapping for 'file_url' is missing")
-	}
-
 	getVal := func(key string) (any, bool) {
 		v, ok := raw[key]
 		return v, ok
@@ -135,10 +149,30 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 
 	getStr := func(key string) (string, bool) {
 		v, ok := getVal(key)
-		if !ok {
+		if !ok || v == nil {
 			return "", false
 		}
-		return fmt.Sprint(v), true
+
+		switch t := v.(type) {
+		case json.Number:
+			// JSON number in string form, e.g. "10317194"
+			return t.String(), true
+		case float64:
+			// Just in case some responses still use float64
+			return strconv.FormatFloat(t, 'f', -1, 64), true
+		default:
+			return fmt.Sprint(t), true
+		}
+	}
+
+	// Required fields
+	idMapping, ok := m["id"]
+	if !ok || idMapping.Key == "" {
+		return domain.Image{}, errors.New("mapping for 'id' is missing")
+	}
+	fileMapping, ok := m["file_url"]
+	if !ok || fileMapping.Key == "" {
+		return domain.Image{}, errors.New("mapping for 'file_url' is missing")
 	}
 
 	// id
@@ -166,10 +200,11 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 	}
 
 	// image_src_url
-	var imageSrc string
-	if imgSrcMapping, ok := m["image_src_url"]; ok && imgSrcMapping.Key != "" {
-		if s, ok := getStr(imgSrcMapping.Key); ok {
-			imageSrc = s
+	var source *string
+	if sourceMapping, ok := m["source"]; ok && sourceMapping.Key != "" {
+		if s, ok := getStr(sourceMapping.Key); ok && s != "" {
+			tmp := s
+			source = &tmp
 		}
 	}
 
@@ -188,7 +223,6 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 			case "g", "general", "safe":
 				rating = domain.RatingGeneral
 			default:
-				// kalau nggak kebaca, biarin kosong aja
 			}
 		}
 	}
@@ -202,10 +236,11 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 	}
 
 	// parent_id
-	var parentID string
+	var parentID *string
 	if parentMapping, ok := m["parent_id"]; ok && parentMapping.Key != "" {
-		if s, ok := getStr(parentMapping.Key); ok {
-			parentID = s
+		if s, ok := getStr(parentMapping.Key); ok && s != "" {
+			tmp := s
+			parentID = &tmp
 		}
 	}
 
@@ -217,7 +252,7 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 		}
 	}
 
-	// tags (string "a b c" atau array)
+	// tags
 	var tags []string
 	if tagsMapping, ok := m["tags"]; ok && tagsMapping.Key != "" {
 		if v, ok := getVal(tagsMapping.Key); ok {
@@ -252,9 +287,9 @@ func mapRawToImage(src domain.Source, raw map[string]any) (domain.Image, error) 
 
 	return domain.Image{
 		ID:          id,
-		Source:      src.Code,
+		Upstream:    src.Code,
 		CreatedAt:   createdAt,
-		ImageSrcURL: imageSrc,
+		Source:      source,
 		Rating:      rating,
 		Tags:        tags,
 		HasChildren: hasChildren,

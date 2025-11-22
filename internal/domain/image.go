@@ -13,13 +13,13 @@ const (
 
 type Image struct {
 	ID          string     `json:"id"`
-	Source      SourceCode `json:"source"`
+	Upstream    SourceCode `json:"upstream"`
 	CreatedAt   time.Time  `json:"created_at"`
-	ImageSrcURL string     `json:"image_src_url"`
+	Source      *string    `json:"source"`
 	Rating      Rating     `json:"rating"`
 	Tags        []string   `json:"tags,omitempty"`
 	HasChildren bool       `json:"has_children"`
-	ParentID    string     `json:"parent_id"`
+	ParentID    *string    `json:"parent_id"`
 	MD5         string     `json:"md5"`
 	PreviewURL  string     `json:"preview_url,omitempty"`
 	SampleURL   string     `json:"sample_url,omitempty"`
